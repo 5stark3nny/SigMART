@@ -1,46 +1,43 @@
-# SigMART
+# SigMART — Full-stack marketplace
 
 **Good finds. Better living.**
 
-SigMART is a responsive online marketplace storefront prototype built with plain HTML, CSS, and JavaScript. It is intentionally dependency-free so it can be previewed quickly on GitHub Pages or any static web host.
+SigMART is a full-stack online storefront with a responsive frontend and Node.js backend. It includes product search/filter/sort, favourites, cart, account registration/sign-in, order placement, order history, newsletter signups, stock management and a basic admin dashboard.
 
-## Preview locally
+## Run locally
 
-Open `index.html` in your browser, or serve the repository with any static web server.
+Requires Node.js 20+.
 
-## What's included
+```bash
+npm install
+npm start
+```
 
-- Responsive storefront and category navigation
-- Product grid with sample products and NGN prices
-- Live search, category filters, and price/rating sorting
-- Add-to-cart controls, quantity updates, and subtotal calculation
-- Favourite toggles
-- Demo checkout form with delivery details and order-preview confirmation
-- Newsletter signup interaction placeholder
-- Mobile-friendly layout and reduced-motion support
+Open http://localhost:3000. The catalogue is seeded on first launch; data is stored in `data/store.json`.
 
-## Important prototype notes
+## Deploy the full application
 
-- Product listings, prices, ratings, and inventory are illustrative sample data.
-- Cart contents are held in browser memory and reset on reload.
-- Checkout does **not** create a real order, collect payment, or transmit personal details.
-- Newsletter signup is not connected to a mailing-list service.
-- No backend, database, authentication, payment gateway, or delivery integration is configured.
+GitHub Pages hosts static files only and cannot run this backend. Deploy as a **Render Web Service** instead. The included `render.yaml` defines the Node service and health check.
 
-## Suggested next steps
+1. In Render, choose **New → Blueprint** and select this repository (or create a Web Service with build command `npm install` and start command `npm start`).
+2. Set `ADMIN_EMAIL` to the email address that should receive store-admin access.
+3. Ensure `SESSION_SECRET` is a long random value (the Blueprint generates one).
+4. Deploy and check `/api/health`.
 
-1. Connect a backend and database for real products, stock, users, and orders.
-2. Add secure authentication and server-side cart/order validation.
-3. Integrate a payment provider appropriate for the launch market (for example, Paystack or Flutterwave in Nigeria).
-4. Configure delivery rates, order notifications, and an admin product dashboard.
-5. Add tests, error handling, privacy disclosures, and production deployment settings.
+## Features
 
-## Stack
+- Responsive product catalogue with search, category filters and sorting
+- Password hashing using Node scrypt and signed HttpOnly session cookies
+- Cart and checkout; order creation validates stock and decrements inventory
+- Customer order history
+- Admin dashboard, product creation and order status updates
+- Newsletter email collection
 
-- HTML
-- CSS
-- Vanilla JavaScript
+## Important production limits
 
-## License
+- Checkout currently uses **cash on delivery**. No card data is collected and no online payments are processed. To accept online payments, integrate Paystack or Stripe using server-side secrets and verified webhooks.
+- Newsletter addresses are stored but no emails are sent.
+- The JSON file database is a starter store. Free hosting may reset local files after restart/redeploy; use PostgreSQL or another managed database for production.
+- For a public production launch, add rate limiting, CSRF protection, account recovery, database backups and security review.
 
-No license has been selected yet.
+Admin access is granted only when the registering email matches the server's `ADMIN_EMAIL` environment variable. Set that value before registering the intended admin account.
