@@ -6,7 +6,8 @@ const crypto = require('node:crypto');
 const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
-const DATA_DIR = path.join(ROOT, 'data');
+// Set DATA_DIR to a mounted persistent directory on hosting (e.g. /var/data on Render).
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
 const DB_FILE = path.join(DATA_DIR, 'store.json');
 const SECRET = process.env.SESSION_SECRET || 'dev-only-change-this-secret-before-deploying';
 fs.mkdirSync(DATA_DIR, { recursive: true });
