@@ -9,5 +9,5 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: SESSION_SECRET
+      - key: ADMIN_EMAIL\n        sync: false\n      - key: SESSION_SECRET
         generateValue: true
