@@ -64,7 +64,7 @@ async function paystackVerify(reference) {
  const tx=result.data,order=db.orders.find(o=>o.paymentReference===reference);
  if(!order)throw new Error('Payment reference is not linked to an order.');
  if(tx.reference!==reference||tx.currency!=='NGN'||Number(tx.amount)!==order.total*100)throw new Error('Payment details do not match the order.');
- if(tx.status==='success'&&order.paymentStatus!=='paid'){order.paymentStatus='paid';order.paymentProvider='Paystack';order.paidAt=new Date().toISOString();order.status='processing';await saveDB(db);}
+ if(tx.status==='success'&&order.paymentStatus!=='paid'){order.paymentStatus='paid';order.paymentProvider='Paystack';order.paidAt=new Date().toISOString();order.status='processing';await saveDB(db);await notifyAdmin(order,'payment_confirmed');}
  else if(['failed','abandoned'].includes(tx.status)&&order.paymentStatus!=='paid'){order.paymentStatus='failed';order.status='cancelled';for(const line of order.items){const product=db.products.find(p=>p.id===line.productId);if(product)product.stock+=line.quantity;}await saveDB(db);}
  return {order,transactionStatus:tx.status};
 }
@@ -73,6 +73,74 @@ function safeUser(u) { return u?{id:u.id,name:u.name,email:u.email,role:u.role}:
 function parseBody(req) { return new Promise((resolve,reject)=>{let s='';req.on('data',c=>{s+=c;if(s.length>1e6){reject(new Error('Request too large'));req.destroy();}});req.on('end',()=>{req.rawBody=Buffer.from(s);try{resolve(s?JSON.parse(s):{});}catch{reject(new Error('Invalid JSON'));}});req.on('error',reject);}); }
 function clean(v,max=500) { return String(v??'').trim().slice(0,max); }
 function validEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+
+function escapeHtml(value) {
+ return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function orderNotificationContent(order, event) {
+ const paid = event === 'payment_confirmed';
+ const title = paid ? 'Payment confirmed' : 'New order received';
+ const items = (order.items || []).map(item => `- ${item.name} × ${item.quantity} — ₦${(item.price * item.quantity).toLocaleString('en-NG')}`).join('\n');
+ const paymentStatus = paid ? 'PAID' : String(order.paymentStatus || 'pending').toUpperCase();
+ const text = [
+   `SigMART — ${title}`,
+   `Order: ${order.id}`,
+   `Total: ₦${Number(order.total || 0).toLocaleString('en-NG')}`,
+   `Payment: ${order.paymentMethod || 'Unknown'} (${paymentStatus})`,
+   `Order status: ${order.status || 'received'}`,
+   '',
+   'Items:',
+   items || '(no items)',
+   '',
+   `Customer: ${order.userEmail || 'Unknown'}`,
+   `Phone: ${order.delivery?.phone || 'Not provided'}`,
+   `Delivery address: ${order.delivery?.address || 'Not provided'}`,
+   `Placed: ${order.createdAt || new Date().toISOString()}`
+ ].join('\n');
+ const html = `<h2>SigMART — ${escapeHtml(title)}</h2><p><b>Order:</b> ${escapeHtml(order.id)}<br><b>Total:</b> ₦${Number(order.total || 0).toLocaleString('en-NG')}<br><b>Payment:</b> ${escapeHtml(order.paymentMethod || 'Unknown')} (${escapeHtml(paymentStatus)})<br><b>Order status:</b> ${escapeHtml(order.status || 'received')}</p><h3>Items</h3><ul>${(order.items || []).map(item => `<li>${escapeHtml(item.name)} × ${Number(item.quantity)} — ₦${(item.price * item.quantity).toLocaleString('en-NG')}</li>`).join('')}</ul><p><b>Customer:</b> ${escapeHtml(order.userEmail || 'Unknown')}<br><b>Phone:</b> ${escapeHtml(order.delivery?.phone || 'Not provided')}<br><b>Delivery address:</b> ${escapeHtml(order.delivery?.address || 'Not provided')}<br><b>Placed:</b> ${escapeHtml(order.createdAt || new Date().toISOString())}</p>`;
+ return { title, text, html };
+}
+async function notifyAdmin(order, event = 'new_order') {
+ const adminEmail = (process.env.ADMIN_EMAIL || '5stark3nny@gmail.com').trim();
+ const { title, text, html } = orderNotificationContent(order, event);
+ const tasks = [];
+ if (process.env.RESEND_API_KEY) {
+   tasks.push((async () => {
+     const response = await fetch('https://api.resend.com/emails', {
+       method: 'POST',
+       headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+       body: JSON.stringify({
+         from: process.env.EMAIL_FROM || 'SigMART <onboarding@resend.dev>',
+         to: [adminEmail],
+         subject: `[${title}] ${order.id}`,
+         text,
+         html
+       }),
+       signal: AbortSignal.timeout(8000)
+     });
+     if (!response.ok) throw new Error('Resend email API returned HTTP ' + response.status);
+     console.log('Admin order email sent for', order.id, event);
+   })().catch(err => console.error('Admin order email failed:', err.message)));
+ } else {
+   console.warn('Order email notifications are disabled: RESEND_API_KEY is not configured.');
+ }
+ if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+   tasks.push((async () => {
+     const response = await fetch('https://api.telegram.org/bot' + process.env.TELEGRAM_BOT_TOKEN + '/sendMessage', {
+       method: 'POST',
+       headers: { 'Content-Type': 'application/json' },
+       body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHAT_ID, text }),
+       signal: AbortSignal.timeout(8000)
+     });
+     const result = await response.json().catch(() => ({}));
+     if (!response.ok || !result.ok) throw new Error('Telegram API rejected the notification.');
+     console.log('Admin Telegram alert sent for', order.id, event);
+   })().catch(err => console.error('Admin Telegram alert failed:', err.message)));
+ } else {
+   console.warn('Phone alerts are disabled: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not both configured.');
+ }
+ await Promise.all(tasks);
+}
 function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')) { return {salt,hash:crypto.scryptSync(password,salt,64).toString('hex')}; }
 function passwordMatches(password,user) { const h=crypto.scryptSync(password,user.salt,64); return crypto.timingSafeEqual(h,Buffer.from(user.passwordHash,'hex')); }
 function requireUser(req,res) { const u=currentUser(req); if(!u)send(res,401,{error:'Please sign in to continue.'}); return u; }
@@ -85,7 +153,7 @@ async function route(req,res) {
  if(req.method==='POST'&&p==='/api/auth/register') { const b=await parseBody(req); const name=clean(b.name,80),email=clean(b.email,160).toLowerCase(),password=String(b.password||''); if(name.length<2||!validEmail(email)||password.length<8)return send(res,400,{error:'Enter your name, a valid email and a password of at least 8 characters.'}); if(db.users.some(u=>u.email===email))return send(res,409,{error:'An account with that email already exists.'}); const hp=hashPassword(password); const u={id:crypto.randomUUID(),name,email,...{salt:hp.salt,passwordHash:hp.hash},role:(process.env.ADMIN_EMAIL&&email===process.env.ADMIN_EMAIL.toLowerCase())?'admin':'customer',createdAt:new Date().toISOString()}; db.users.push(u);await saveDB(db);return send(res,201,{user:safeUser(u)},{'Set-Cookie':'sigmart_session='+encodeURIComponent(makeSession(u))+'; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800'+(process.env.NODE_ENV==='production'?'; Secure':'')}); }
  if(req.method==='POST'&&p==='/api/auth/login') { const b=await parseBody(req); const email=clean(b.email,160).toLowerCase(),u=db.users.find(x=>x.email===email); if(!u||!passwordMatches(String(b.password||''),u))return send(res,401,{error:'Email or password is incorrect.'});if(process.env.ADMIN_EMAIL&&u.email===process.env.ADMIN_EMAIL.toLowerCase()&&u.role!=='admin'){u.role='admin';await saveDB(db);}return send(res,200,{user:safeUser(u)},{'Set-Cookie':'sigmart_session='+encodeURIComponent(makeSession(u))+'; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800'+(process.env.NODE_ENV==='production'?'; Secure':'')}); }
  if(req.method==='POST'&&p==='/api/auth/logout')return send(res,200,{ok:true},{'Set-Cookie':'sigmart_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'+(process.env.NODE_ENV==='production'?'; Secure':'')});
- if(req.method==='POST'&&p==='/api/orders') { const u=requireUser(req,res);if(!u)return; const b=await parseBody(req); const items=Array.isArray(b.items)?b.items:[]; if(!items.length)return send(res,400,{error:'Your cart is empty.'}); let total=0,lines=[]; for(const it of items){const product=db.products.find(x=>x.id===it.id),qty=Math.max(1,Math.min(20,Number(it.quantity)||1));if(!product||product.stock<qty)return send(res,409,{error:'A product is unavailable or has insufficient stock. Refresh your cart and try again.'});total+=product.price*qty;lines.push({productId:product.id,name:product.name,price:product.price,quantity:qty});} const address=clean(b.address,300),phone=clean(b.phone,40),method=b.paymentMethod==='paystack'?'Paystack':'Cash on delivery';if(address.length<8||phone.length<7)return send(res,400,{error:'Enter a delivery address and phone number.'});if(method==='Paystack'&&!process.env.PAYSTACK_SECRET_KEY)return send(res,503,{error:'Online payments are not configured yet. Please choose cash on delivery or try again later.'}); for(const line of lines){const product=db.products.find(x=>x.id===line.productId);product.stock-=line.quantity;} const order={id:'SM-'+Date.now().toString(36).toUpperCase(),userId:u.id,userEmail:u.email,items:lines,total,delivery:{address,phone},paymentMethod:method,paymentStatus:method==='Paystack'?'initiated':'pending',status:'received',createdAt:new Date().toISOString()};db.orders.unshift(order);await saveDB(db);if(method==='Paystack'){const reference='SM-'+crypto.randomBytes(12).toString('hex');order.paymentReference=reference;await saveDB(db);try{const response=await fetch('https://api.paystack.co/transaction/initialize',{method:'POST',headers:{Authorization:'Bearer '+process.env.PAYSTACK_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({email:u.email,amount:String(total*100),currency:'NGN',reference,callback_url:(process.env.APP_URL||'https://sigmart.onrender.com').replace(/\/$/,'')+'/api/payments/paystack/callback',metadata:{order_id:order.id,user_id:u.id}})});const result=await response.json().catch(()=>({}));if(!response.ok||!result.status||!result.data?.authorization_url)throw new Error(result.message||'Paystack could not start checkout.');order.paymentAccessCode=result.data.access_code;await saveDB(db);return send(res,201,{order:{id:order.id,total:order.total,paymentStatus:order.paymentStatus},authorizationUrl:result.data.authorization_url});}catch(err){for(const line of lines){const product=db.products.find(x=>x.id===line.productId);if(product)product.stock+=line.quantity;}db.orders=db.orders.filter(o=>o.id!==order.id);await saveDB(db);return send(res,502,{error:'Could not start secure payment. No order was placed. Please try again.'});}}return send(res,201,{order:{...order,user:safeUser(u)}}); }
+ if(req.method==='POST'&&p==='/api/orders') { const u=requireUser(req,res);if(!u)return; const b=await parseBody(req); const items=Array.isArray(b.items)?b.items:[]; if(!items.length)return send(res,400,{error:'Your cart is empty.'}); let total=0,lines=[]; for(const it of items){const product=db.products.find(x=>x.id===it.id),qty=Math.max(1,Math.min(20,Number(it.quantity)||1));if(!product||product.stock<qty)return send(res,409,{error:'A product is unavailable or has insufficient stock. Refresh your cart and try again.'});total+=product.price*qty;lines.push({productId:product.id,name:product.name,price:product.price,quantity:qty});} const address=clean(b.address,300),phone=clean(b.phone,40),method=b.paymentMethod==='paystack'?'Paystack':'Cash on delivery';if(address.length<8||phone.length<7)return send(res,400,{error:'Enter a delivery address and phone number.'});if(method==='Paystack'&&!process.env.PAYSTACK_SECRET_KEY)return send(res,503,{error:'Online payments are not configured yet. Please choose cash on delivery or try again later.'}); for(const line of lines){const product=db.products.find(x=>x.id===line.productId);product.stock-=line.quantity;} const order={id:'SM-'+Date.now().toString(36).toUpperCase(),userId:u.id,userEmail:u.email,items:lines,total,delivery:{address,phone},paymentMethod:method,paymentStatus:method==='Paystack'?'initiated':'pending',status:'received',createdAt:new Date().toISOString()};db.orders.unshift(order);await saveDB(db);if(method==='Paystack'){const reference='SM-'+crypto.randomBytes(12).toString('hex');order.paymentReference=reference;await saveDB(db);try{const response=await fetch('https://api.paystack.co/transaction/initialize',{method:'POST',headers:{Authorization:'Bearer '+process.env.PAYSTACK_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({email:u.email,amount:String(total*100),currency:'NGN',reference,callback_url:(process.env.APP_URL||'https://sigmart.onrender.com').replace(/\/$/,'')+'/api/payments/paystack/callback',metadata:{order_id:order.id,user_id:u.id}})});const result=await response.json().catch(()=>({}));if(!response.ok||!result.status||!result.data?.authorization_url)throw new Error(result.message||'Paystack could not start checkout.');order.paymentAccessCode=result.data.access_code;await saveDB(db);await notifyAdmin(order,'new_order');return send(res,201,{order:{id:order.id,total:order.total,paymentStatus:order.paymentStatus},authorizationUrl:result.data.authorization_url});}catch(err){for(const line of lines){const product=db.products.find(x=>x.id===line.productId);if(product)product.stock+=line.quantity;}db.orders=db.orders.filter(o=>o.id!==order.id);await saveDB(db);return send(res,502,{error:'Could not start secure payment. No order was placed. Please try again.'});}}await notifyAdmin(order,'new_order');return send(res,201,{order:{...order,user:safeUser(u)}}); }
 
  if(req.method==='GET'&&p==='/api/payments/paystack/callback'){const reference=clean(url.searchParams.get('reference'),120);try{const result=await paystackVerify(reference);const status=result.transactionStatus==='success'?'success':result.transactionStatus==='failed'||result.transactionStatus==='abandoned'?'failed':'pending';res.writeHead(302,{Location:'/?payment='+status});return res.end();}catch(err){res.writeHead(302,{Location:'/?payment=verify'});return res.end();}}
  if(req.method==='POST'&&p==='/api/payments/paystack/webhook'){if(!process.env.PAYSTACK_SECRET_KEY)return send(res,503,{error:'Payments not configured'});const b=await parseBody(req);const signature=String(req.headers['x-paystack-signature']||'');const expected=crypto.createHmac('sha512',process.env.PAYSTACK_SECRET_KEY).update(req.rawBody||Buffer.from('')).digest('hex');const a=Buffer.from(signature,'hex'),e=Buffer.from(expected,'hex');if(a.length!==e.length||!crypto.timingSafeEqual(a,e))return send(res,401,{error:'Invalid signature'});if(b.event==='charge.success'&&b.data?.reference){try{await paystackVerify(clean(b.data.reference,120));}catch(err){console.error('Paystack webhook verification failed:',err.message);}}return send(res,200,{received:true});}
