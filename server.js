@@ -1,0 +1,65 @@
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const PORT = Number(process.env.PORT || 3000);
+const ROOT = __dirname;
+const PUBLIC = path.join(ROOT, 'public');
+const DATA_DIR = path.join(ROOT, 'data');
+const DB_FILE = path.join(DATA_DIR, 'store.json');
+const SECRET = process.env.SESSION_SECRET || 'dev-only-change-this-secret-before-deploying';
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const seedProducts = [
+ {id:'p1',name:'Aura Wireless Headphones',category:'Electronics',price:24500,oldPrice:32000,rating:4.8,stock:18,emoji:'🎧',color:'#e7e5ff',description:'Immersive sound, soft ear cushions and all-day comfort.'},
+ {id:'p2',name:'Everyday Canvas Tote',category:'Fashion',price:8500,oldPrice:11000,rating:4.7,stock:32,emoji:'👜',color:'#f6e5d5',description:'A durable everyday carry-all with a clean minimalist finish.'},
+ {id:'p3',name:'Cloud Ceramic Mug Set',category:'Home',price:12000,oldPrice:15000,rating:4.9,stock:24,emoji:'☕',color:'#dcece6',description:'Two glazed ceramic mugs for slow mornings and good coffee.'},
+ {id:'p4',name:'Glow Desk Lamp',category:'Home',price:18500,oldPrice:22000,rating:4.6,stock:12,emoji:'💡',color:'#f9e9c8',description:'Warm adjustable lighting for your desk, bedside or reading nook.'},
+ {id:'p5',name:'Move Everyday Sneakers',category:'Fashion',price:39000,oldPrice:45000,rating:4.8,stock:9,emoji:'👟',color:'#e4eaf2',description:'Lightweight daily sneakers built for comfort and movement.'},
+ {id:'p6',name:'Pocket Bluetooth Speaker',category:'Electronics',price:27500,oldPrice:34000,rating:4.5,stock:15,emoji:'🔊',color:'#f2dfe7',description:'Compact portable sound with a surprisingly rich bass.'},
+ {id:'p7',name:'Daily Notes Journal',category:'Stationery',price:6500,oldPrice:8000,rating:4.7,stock:40,emoji:'📓',color:'#e4ebd8',description:'A sturdy lined notebook for plans, ideas and everything between.'},
+ {id:'p8',name:'Soft Knit Throw',category:'Home',price:22000,oldPrice:28000,rating:4.9,stock:11,emoji:'🧶',color:'#eadff0',description:'A soft textured throw for cosy evenings and quiet weekends.'},
+ {id:'p9',name:'Hydration Bottle',category:'Lifestyle',price:9500,oldPrice:12000,rating:4.6,stock:27,emoji:'🧴',color:'#d8eaf4',description:'Reusable, leak-resistant bottle for everyday hydration.'},
+ {id:'p10',name:'Minimal Wrist Watch',category:'Fashion',price:31500,oldPrice:39000,rating:4.7,stock:8,emoji:'⌚',color:'#f0e5d2',description:'A timeless understated design that works with any outfit.'},
+ {id:'p11',name:'Plant Buddy Planter',category:'Home',price:7500,oldPrice:9500,rating:4.8,stock:21,emoji:'🪴',color:'#dcebd8',description:'A simple ceramic planter to bring a little green indoors.'},
+ {id:'p12',name:'Power Bank 10K',category:'Electronics',price:21000,oldPrice:26000,rating:4.6,stock:14,emoji:'🔋',color:'#e3e4e8',description:'Reliable portable power for your daily commute and travel.'}
+];
+function loadDB() {
+ try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
+ catch { const initial={products:seedProducts,users:[],orders:[],subscribers:[]}; saveDB(initial); return initial; }
+}
+function saveDB(db) { const temp=DB_FILE+'.tmp'; fs.writeFileSync(temp, JSON.stringify(db,null,2)); fs.renameSync(temp,DB_FILE); }
+let db=loadDB();
+const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml'};
+function send(res,status,data,headers={}) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','X-Content-Type-Options':'nosniff','Cache-Control':'no-store',...headers}); res.end(JSON.stringify(data)); }
+function cookie(req,name) { const found=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(name+'=')); return found?decodeURIComponent(found.slice(name.length+1)):''; }
+function sign(value) { return crypto.createHmac('sha256',SECRET).update(value).digest('hex'); }
+function makeSession(user) { const body=Buffer.from(JSON.stringify({id:user.id,exp:Date.now()+7*86400000})).toString('base64url'); return body+'.'+sign(body); }
+function currentUser(req) { const token=cookie(req,'sigmart_session'); if(!token)return null; const [body,mac]=token.split('.'); if(!body||!mac||!crypto.timingSafeEqual(Buffer.from(mac),Buffer.from(sign(body))))return null; try { const payload=JSON.parse(Buffer.from(body,'base64url').toString()); if(payload.exp<Date.now())return null; return db.users.find(u=>u.id===payload.id)||null; } catch{return null;} }
+function safeUser(u) { return u?{id:u.id,name:u.name,email:u.email,role:u.role}:null; }
+function parseBody(req) { return new Promise((resolve,reject)=>{let s='';req.on('data',c=>{s+=c;if(s.length>1e6){reject(new Error('Request too large'));req.destroy();}});req.on('end',()=>{try{resolve(s?JSON.parse(s):{});}catch{reject(new Error('Invalid JSON'));}});req.on('error',reject);}); }
+function clean(v,max=500) { return String(v??'').trim().slice(0,max); }
+function validEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')) { return {salt,hash:crypto.scryptSync(password,salt,64).toString('hex')}; }
+function passwordMatches(password,user) { const h=crypto.scryptSync(password,user.salt,64); return crypto.timingSafeEqual(h,Buffer.from(user.passwordHash,'hex')); }
+function requireUser(req,res) { const u=currentUser(req); if(!u)send(res,401,{error:'Please sign in to continue.'}); return u; }
+function requireAdmin(req,res,user) { if(user.role!=='admin'){send(res,403,{error:'Admin access required.'});return false;} return true; }
+async function route(req,res) {
+ const url=new URL(req.url,'http://localhost'); const p=url.pathname;
+ if(req.method==='GET'&&p==='/api/health')return send(res,200,{ok:true,service:'SigMART API',time:new Date().toISOString()});
+ if(req.method==='GET'&&p==='/api/products') { let products=[...db.products]; const q=clean(url.searchParams.get('q'),100).toLowerCase(); const cat=url.searchParams.get('category'); const sort=url.searchParams.get('sort')||'featured'; if(q)products=products.filter(x=>(x.name+' '+x.description+' '+x.category).toLowerCase().includes(q)); if(cat&&cat!=='All')products=products.filter(x=>x.category===cat); if(sort==='price-low')products.sort((a,b)=>a.price-b.price); if(sort==='price-high')products.sort((a,b)=>b.price-a.price); if(sort==='rating')products.sort((a,b)=>b.rating-a.rating); return send(res,200,{products,categories:['All',...new Set(db.products.map(x=>x.category))]}); }
+ if(req.method==='GET'&&p==='/api/auth/me')return send(res,200,{user:safeUser(currentUser(req))});
+ if(req.method==='POST'&&p==='/api/auth/register') { const b=await parseBody(req); const name=clean(b.name,80),email=clean(b.email,160).toLowerCase(),password=String(b.password||''); if(name.length<2||!validEmail(email)||password.length<8)return send(res,400,{error:'Enter your name, a valid email and a password of at least 8 characters.'}); if(db.users.some(u=>u.email===email))return send(res,409,{error:'An account with that email already exists.'}); const hp=hashPassword(password); const u={id:crypto.randomUUID(),name,email,...{salt:hp.salt,passwordHash:hp.hash},role:db.users.length===0?'admin':'customer',createdAt:new Date().toISOString()}; db.users.push(u);saveDB(db);return send(res,201,{user:safeUser(u)},{'Set-Cookie':'sigmart_session='+encodeURIComponent(makeSession(u))+'; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800'+(process.env.NODE_ENV==='production'?'; Secure':'')}); }
+ if(req.method==='POST'&&p==='/api/auth/login') { const b=await parseBody(req); const email=clean(b.email,160).toLowerCase(),u=db.users.find(x=>x.email===email); if(!u||!passwordMatches(String(b.password||''),u))return send(res,401,{error:'Email or password is incorrect.'});return send(res,200,{user:safeUser(u)},{'Set-Cookie':'sigmart_session='+encodeURIComponent(makeSession(u))+'; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800'+(process.env.NODE_ENV==='production'?'; Secure':'')}); }
+ if(req.method==='POST'&&p==='/api/auth/logout')return send(res,200,{ok:true},{'Set-Cookie':'sigmart_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'+(process.env.NODE_ENV==='production'?'; Secure':'')});
+ if(req.method==='POST'&&p==='/api/orders') { const u=requireUser(req,res);if(!u)return; const b=await parseBody(req); const items=Array.isArray(b.items)?b.items:[]; if(!items.length)return send(res,400,{error:'Your cart is empty.'}); let total=0,lines=[]; for(const it of items){const product=db.products.find(x=>x.id===it.id),qty=Math.max(1,Math.min(20,Number(it.quantity)||1));if(!product||product.stock<qty)return send(res,409,{error:'A product is unavailable or has insufficient stock. Refresh your cart and try again.'});total+=product.price*qty;lines.push({productId:product.id,name:product.name,price:product.price,quantity:qty});} const address=clean(b.address,300),phone=clean(b.phone,40);if(address.length<8||phone.length<7)return send(res,400,{error:'Enter a delivery address and phone number.'}); for(const line of lines){const product=db.products.find(x=>x.id===line.productId);product.stock-=line.quantity;} const order={id:'SM-'+Date.now().toString(36).toUpperCase(),userId:u.id,items:lines,total,delivery:{address,phone},paymentMethod:'Cash on delivery',paymentStatus:'pending',status:'received',createdAt:new Date().toISOString()};db.orders.unshift(order);saveDB(db);return send(res,201,{order:{...order,user:safeUser(u)}}); }
+ if(req.method==='GET'&&p==='/api/orders') {const u=requireUser(req,res);if(!u)return;return send(res,200,{orders:db.orders.filter(o=>o.userId===u.id)});}
+ if(req.method==='POST'&&p==='/api/newsletter') {const b=await parseBody(req),email=clean(b.email,160).toLowerCase();if(!validEmail(email))return send(res,400,{error:'Enter a valid email address.'});if(!db.subscribers.includes(email)){db.subscribers.push(email);saveDB(db);}return send(res,201,{message:'You’re on the list. Thanks for subscribing!'});}
+ if(p==='/api/admin/summary'||p==='/api/admin/products'||p==='/api/admin/orders') {const u=requireUser(req,res);if(!u)return;if(!requireAdmin(req,res,u))return;if(req.method==='GET'&&p==='/api/admin/summary')return send(res,200,{products:db.products.length,orders:db.orders.length,users:db.users.length,revenue:db.orders.reduce((n,o)=>n+o.total,0)});if(req.method==='GET'&&p==='/api/admin/products')return send(res,200,{products:db.products});if(req.method==='GET'&&p==='/api/admin/orders')return send(res,200,{orders:db.orders});}
+ if(req.method==='POST'&&p==='/api/admin/products') {const u=requireUser(req,res);if(!u)return;if(!requireAdmin(req,res,u))return;const b=await parseBody(req),name=clean(b.name,100),category=clean(b.category,50),price=Number(b.price),stock=Number(b.stock);if(!name||!category||!Number.isFinite(price)||price<1||!Number.isInteger(stock)||stock<0)return send(res,400,{error:'Provide a product name, category, valid price and stock quantity.'});const product={id:crypto.randomUUID(),name,category,price:Math.round(price),oldPrice:Number(b.oldPrice)||Math.round(price),rating:4.5,stock,emoji:clean(b.emoji||'🛍️',8),color:'#e7e5ff',description:clean(b.description,500)};db.products.unshift(product);saveDB(db);return send(res,201,{product});}
+ if(req.method==='PATCH'&&p.startsWith('/api/admin/orders/')) {const u=requireUser(req,res);if(!u)return;if(!requireAdmin(req,res,u))return;const id=decodeURIComponent(p.split('/').pop()),order=db.orders.find(o=>o.id===id);if(!order)return send(res,404,{error:'Order not found.'});const b=await parseBody(req);if(!['received','processing','shipped','delivered','cancelled'].includes(b.status))return send(res,400,{error:'Invalid order status.'});order.status=b.status;saveDB(db);return send(res,200,{order});}
+ if(p.startsWith('/api/'))return send(res,404,{error:'API route not found.'});
+ const requested=p==='/'?'/index.html':decodeURIComponent(p);const file=path.resolve(PUBLIC,'.'+requested);if(!file.startsWith(PUBLIC+path.sep))return send(res,403,{error:'Forbidden'});fs.readFile(file,(err,data)=>{if(err){fs.readFile(path.join(PUBLIC,'index.html'),(e,d)=>{if(e)return send(res,404,{error:'Not found'});res.writeHead(200,{'Content-Type':mime['.html']});res.end(d);});return;}res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','X-Content-Type-Options':'nosniff'});res.end(data);});
+}
+http.createServer((req,res)=>{Promise.resolve(route(req,res)).catch(err=>{console.error(err);if(!res.headersSent)send(res,500,{error:'Something went wrong. Please try again.'});});}).listen(PORT,()=>console.log('SigMART running on port '+PORT));
