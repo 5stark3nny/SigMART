@@ -4,7 +4,9 @@ const money = (n) => new Intl.NumberFormat('en-NG',{style:'currency',currency:'N
 async function api(url, options={}) { const res=await fetch(url,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(options.headers||{})},...options}); const data=await res.json().catch(()=>({})); if(!res.ok)throw new Error(data.error||'Something went wrong'); return data; }
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),2800);}
 function persistCart(){localStorage.setItem('sigmart_cart',JSON.stringify(state.cart));$('#cart-count').textContent=state.cart.reduce((n,x)=>n+x.quantity,0);}
-function persistFavorites(){localStorage.setItem('sigmart_favorites',JSON.stringify([...state.favorites]));}\nfunction persistRecent(){localStorage.setItem('sigmart_recent',JSON.stringify(state.recent.slice(0,12)));}\nfunction rememberProduct(id){state.recent=[id,...state.recent.filter(x=>x!==id)].slice(0,12);persistRecent();}
+function persistFavorites(){localStorage.setItem('sigmart_favorites',JSON.stringify([...state.favorites]));}
+function persistRecent(){localStorage.setItem('sigmart_recent',JSON.stringify(state.recent.slice(0,12)));}
+function rememberProduct(id){state.recent=[id,...state.recent.filter(x=>x!==id)].slice(0,12);persistRecent();}
 function visibleProducts(){return state.products.filter(p=>(state.category==='All'||p.category===state.category)&&(!state.query||(p.name+' '+p.description+' '+p.category).toLowerCase().includes(state.query.toLowerCase()))).sort((a,b)=>state.sort==='price-low'?a.price-b.price:state.sort==='price-high'?b.price-a.price:state.sort==='rating'?b.rating-a.rating:0);}
 function renderCategories(){const cats=['All',...new Set(state.products.map(p=>p.category))];$('#category-list').innerHTML=cats.map(c=>'<button class="category '+(state.category===c?'active':'')+'" data-category="'+escapeHTML(c)+'">'+escapeHTML(c)+'</button>').join('');}
 function escapeHTML(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
